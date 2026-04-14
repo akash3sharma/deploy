@@ -27,7 +27,7 @@ async function request(path, options = {}) {
   return { response, body }
 }
 
-async function verifySignupInitRecord({ email, state }) {
+async function verifySignupInitRecord({ state }) {
   if (!mongoUri) {
     return {
       skipped: true,
@@ -41,7 +41,6 @@ async function verifySignupInitRecord({ email, state }) {
     const record = await mongoose.connection.db.collection("api_calls").findOne(
       {
         requestType: "signup_init",
-        email,
         state,
       },
       {
@@ -62,9 +61,6 @@ async function verifySignupInitRecord({ email, state }) {
 }
 
 async function main() {
-  const email = `workflow.${Date.now()}@example.com`
-  const password = "Password123!"
-
   const checks = []
 
   const health = await request("/api/health")
@@ -81,21 +77,9 @@ async function main() {
   )
   checks.push("session endpoint returns unauthenticated without cookie")
 
-  const invalidLogin = await request("/api/auth/login", {
-    method: "POST",
-    body: {
-      email,
-      password,
-    },
-  })
-  assert.equal(invalidLogin.response.status, 401, "unknown login should return 401")
-  checks.push("credential login rejects unknown users")
-
   const bootstrap = await request("/api/auth/session/bootstrap", {
     method: "POST",
     body: {
-      email,
-      password,
       redirectUri,
       forceReauth: true,
     },
@@ -113,10 +97,9 @@ async function main() {
   assert.equal(authorizeUrl.searchParams.get("redirect_uri"), redirectUri)
   assert.equal(authorizeUrl.searchParams.get("state"), bootstrap.body.state)
   assert.equal(authorizeUrl.searchParams.get("response_type"), "code")
-  checks.push("signup bootstrap returns valid Instagram authorize URL")
+  checks.push("instagram bootstrap returns valid authorize URL")
 
   const dbVerification = await verifySignupInitRecord({
-    email,
     state: bootstrap.body.state,
   })
   checks.push(dbVerification.message)

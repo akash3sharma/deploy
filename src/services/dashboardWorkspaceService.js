@@ -16,7 +16,6 @@ import { normalizeOwner, normalizeSession } from "../adapters/ownerAdapter"
 import { getInstagramRedirectUri } from "../lib/instagramAuthConfig"
 import { createWorkspaceModel } from "../lib/mockWorkspace"
 import { completeDemoInstagramSignup, getStoredDemoSession } from "./demoSessionService"
-import { consumePendingSignupCredentials } from "./signupCredentialBridge"
 
 function buildWorkspaceResponse(owner, session, warnings = []) {
   const fallbackWorkspace = createWorkspaceModel(owner)
@@ -102,16 +101,6 @@ export async function finishInstagramLogin(callbackParams) {
   }
 
   if (isDemoFallbackEnabled()) {
-    const pendingCredentials = consumePendingSignupCredentials()
-
-    if (!pendingCredentials) {
-      throw new Error(
-        "We could not recover your signup details after Instagram login. Please create your account again.",
-      )
-    }
-
-    payload.email = pendingCredentials.email
-    payload.password = pendingCredentials.password
     await completeDemoInstagramSignup(payload)
     return
   }

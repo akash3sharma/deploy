@@ -1,5 +1,4 @@
 import { normalizeSession } from "../adapters/ownerAdapter"
-import { signInWithPassword } from "../api/auth/credentialAuthApi"
 import { bootstrapInstagramSession } from "../api/auth/sessionBootstrapApi"
 import { getCurrentSession, logoutCurrentSession } from "../api/auth/sessionApi"
 import { ApiError, canUseDemoFallback, isDemoFallbackEnabled } from "../api/core/apiClient"
@@ -7,19 +6,7 @@ import {
   buildDemoInstagramCallbackUrl,
   getInstagramRedirectUri,
 } from "../lib/instagramAuthConfig"
-import { clearDemoSession, getStoredDemoSession, loginDemoUser } from "./demoSessionService"
-import {
-  clearPendingSignupCredentials,
-  savePendingSignupCredentials,
-} from "./signupCredentialBridge"
-
-function assertBackendLoginResponse(response) {
-  if (response?.action === "redirect" || response?.authorizeUrl) {
-    throw new Error(
-      "Returning user login should not redirect to Instagram. Remove OAuth from /api/auth/login.",
-    )
-  }
-}
+import { clearDemoSession, getStoredDemoSession } from "./demoSessionService"
 
 export async function restoreExistingSession() {
   if (isDemoFallbackEnabled()) {
@@ -32,7 +19,6 @@ export async function restoreExistingSession() {
 
     if (session?.authStatus === "authenticated") {
       clearDemoSession()
-      clearPendingSignupCredentials()
     }
 
     return session
@@ -49,56 +35,8 @@ export async function restoreExistingSession() {
   }
 }
 
-export async function loginWithCredentials({ identifier, password }) {
-  const normalizedEmail = identifier.trim().toLowerCase()
-  const payload = {
-    identifier: normalizedEmail,
-    email: normalizedEmail,
-    password,
-  }
-
+export async function startInstagramLogin() {
   if (isDemoFallbackEnabled()) {
-    const session = await loginDemoUser(payload)
-    clearPendingSignupCredentials()
-
-    return {
-      source: "demo",
-      nextStep: { type: "dashboard" },
-      session,
-    }
-  }
-
-  try {
-    const response = await signInWithPassword(payload)
-    assertBackendLoginResponse(response)
-    clearDemoSession()
-    clearPendingSignupCredentials()
-
-    return {
-      source: "backend",
-      nextStep: { type: "dashboard" },
-      response,
-    }
-  } catch (error) {
-    if (!canUseDemoFallback(error)) {
-      throw error
-    }
-
-    const session = await loginDemoUser(payload)
-    clearPendingSignupCredentials()
-
-    return {
-      source: "demo",
-      nextStep: { type: "dashboard" },
-      session,
-    }
-  }
-}
-
-export async function startInstagramSignup({ email, password }) {
-  if (isDemoFallbackEnabled()) {
-    savePendingSignupCredentials({ email, password })
-
     return {
       type: "redirect",
       source: "demo",
@@ -107,8 +45,6 @@ export async function startInstagramSignup({ email, password }) {
   }
 
   const response = await bootstrapInstagramSession({
-    email,
-    password,
     redirectUri: getInstagramRedirectUri(),
     forceReauth: import.meta.env.VITE_INSTAGRAM_FORCE_REAUTH !== "false",
   })
@@ -126,7 +62,6 @@ export async function startInstagramSignup({ email, password }) {
 
 export async function logoutSession() {
   clearDemoSession()
-  clearPendingSignupCredentials()
 
   if (isDemoFallbackEnabled()) {
     return

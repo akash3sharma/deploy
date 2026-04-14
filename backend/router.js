@@ -1,9 +1,13 @@
 const express = require("express")
+const crypto = require("crypto")
 const { connectToDatabase } = require("./db")
 const Owner = require("./models/Owner")
 const ApiCall = require("./models/ApiCall")
 const { hashPassword, verifyPassword } = require("./services/passwordService")
-const { exchangeCodeForLongLivedToken } = require("./services/instagramAuthService")
+const {
+  buildInstagramAuthorizeUrl,
+  exchangeCodeForLongLivedToken,
+} = require("./services/instagramAuthService")
 const { sendPrivateReply } = require("./services/instagramMessagingService")
 const {
   readSessionToken,
@@ -30,20 +34,21 @@ function buildOwnerResponse(owner) {
 }
 
 function validateCallbackPayload(payload) {
+  const code = String(payload?.code || "").trim()
+  const state = String(payload?.state || "").trim()
   const email = normalizeEmail(payload?.email || payload?.identifier || payload?.username)
   const password = String(payload?.password || "")
-  const code = String(payload?.code || "").trim()
-
-  if (!email) {
-    return "Email is required."
-  }
-
-  if (!password.trim()) {
-    return "Password is required."
-  }
 
   if (!code) {
     return "Instagram authorization code is required."
+  }
+
+  if (!state && !email) {
+    return "Email is required when OAuth state is missing."
+  }
+
+  if (!state && !password.trim()) {
+    return "Password is required when OAuth state is missing."
   }
 
   return ""
@@ -120,6 +125,72 @@ async function requireAuthenticatedOwner(req, res, next) {
 const router = express.Router()
 
 router.post(
+  "/auth/session/bootstrap",
+  asyncHandler(async (req, res) => {
+    const validationError = validateLoginPayload(req.body)
+
+    if (validationError) {
+      return res.status(400).json({
+        ok: false,
+        message: validationError,
+      })
+    }
+
+    await connectToDatabase()
+
+    const email = normalizeEmail(req.body.email || req.body.identifier)
+    const password = String(req.body.password || "")
+    const redirectUri = String(req.body.redirectUri || "").trim()
+    const forceReauth = req.body.forceReauth !== false
+    const existingOwner = await Owner.findOne({ email })
+    let passwordHash = existingOwner?.passwordHash || ""
+
+    if (existingOwner) {
+      const passwordMatches = await verifyPassword(password, existingOwner.passwordHash)
+
+      if (!passwordMatches) {
+        return res.status(401).json({
+          ok: false,
+          message: "Email already exists, but the password does not match.",
+        })
+      }
+    } else {
+      passwordHash = await hashPassword(password)
+    }
+
+    const state = `instalead-signup-${crypto.randomBytes(18).toString("hex")}`
+    const authorizeUrl = buildInstagramAuthorizeUrl({
+      redirectUri,
+      state,
+      forceReauth,
+    })
+
+    await ApiCall.create({
+      requestType: "signup_init",
+      status: "received",
+      email,
+      passwordHash,
+      state,
+      redirectUri,
+      ownerId: existingOwner?._id || null,
+      requestPayload: {
+        email,
+        redirectUri,
+        forceReauth,
+        receivedPasswordLength: password.length,
+      },
+    })
+
+    return res.status(200).json({
+      ok: true,
+      action: "redirect",
+      state,
+      authorizeUrl,
+    })
+  }),
+)
+
+router.post(
   "/auth/instagram/callback",
   asyncHandler(async (req, res) => {
     const validationError = validateCallbackPayload(req.body)
@@ -133,17 +204,44 @@ router.post(
 
     await connectToDatabase()
 
-    const email = normalizeEmail(req.body.email || req.body.identifier || req.body.username)
-    const password = String(req.body.password || "")
     const authorizationCode = String(req.body.code || "").trim()
     const state = String(req.body.state || "").trim()
-    const redirectUri = String(req.body.redirectUri || "").trim()
+    let redirectUri = String(req.body.redirectUri || "").trim()
+    let email = normalizeEmail(req.body.email || req.body.identifier || req.body.username)
+    let password = String(req.body.password || "")
+    let bootstrapCall = null
+
+    if (state) {
+      bootstrapCall = await ApiCall.findOne({
+        requestType: "signup_init",
+        state,
+        status: "received",
+      }).sort({ createdAt: -1 })
+
+      if (bootstrapCall) {
+        email = email || normalizeEmail(bootstrapCall.email)
+        redirectUri = redirectUri || String(bootstrapCall.redirectUri || "").trim()
+      }
+    }
+
+    if (!email) {
+      return res.status(400).json({
+        authenticated: false,
+        message: "No pending signup was found for this Instagram login. Please create your account again.",
+      })
+    }
 
     const existingOwner = await Owner.findOne({ email })
-    let passwordHash = existingOwner?.passwordHash || ""
+    let passwordHash = bootstrapCall?.passwordHash || existingOwner?.passwordHash || ""
 
     if (existingOwner) {
-      const passwordMatches = await verifyPassword(password, existingOwner.passwordHash)
+      let passwordMatches = false
+
+      if (password.trim()) {
+        passwordMatches = await verifyPassword(password, existingOwner.passwordHash)
+      } else if (bootstrapCall?.passwordHash) {
+        passwordMatches = existingOwner.passwordHash === bootstrapCall.passwordHash
+      }
 
       if (!passwordMatches) {
         return res.status(401).json({
@@ -152,7 +250,19 @@ router.post(
         })
       }
     } else {
+      if (!passwordHash) {
+        if (!password.trim()) {
+          return res.status(400).json({
+            authenticated: false,
+            message: "Password is required to finish creating the account.",
+          })
+        }
+      }
+
       passwordHash = await hashPassword(password)
+      if (bootstrapCall?.passwordHash) {
+        passwordHash = bootstrapCall.passwordHash
+      }
     }
 
     const apiCall = await ApiCall.create({
@@ -200,6 +310,19 @@ router.post(
       await owner.save()
       setSessionCookie(res, owner)
 
+      if (bootstrapCall) {
+        bootstrapCall.status = "completed"
+        bootstrapCall.ownerId = owner._id
+        bootstrapCall.instagramUserId = exchangeResult.instagramUserId
+        bootstrapCall.shortLivedAccessToken = exchangeResult.shortLivedAccessToken
+        bootstrapCall.longLivedAccessToken = exchangeResult.longLivedAccessToken
+        bootstrapCall.responsePayload = {
+          authorizeCompletedAt: new Date().toISOString(),
+          callbackApiCallId: apiCall._id.toString(),
+        }
+        await bootstrapCall.save()
+      }
+
       apiCall.status = "completed"
       apiCall.ownerId = owner._id
       apiCall.shortLivedAccessToken = exchangeResult.shortLivedAccessToken
@@ -222,6 +345,16 @@ router.post(
         },
       })
     } catch (error) {
+      if (bootstrapCall) {
+        bootstrapCall.status = "failed"
+        bootstrapCall.errorMessage = error.message
+        bootstrapCall.responsePayload = {
+          status: error.status || 500,
+          data: error.data || null,
+        }
+        await bootstrapCall.save()
+      }
+
       apiCall.status = "failed"
       apiCall.errorMessage = error.message
       apiCall.responsePayload = {

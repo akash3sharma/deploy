@@ -5,7 +5,6 @@ import { getCurrentSession, logoutCurrentSession } from "../api/auth/sessionApi"
 import { ApiError, canUseDemoFallback, isDemoFallbackEnabled } from "../api/core/apiClient"
 import {
   buildDemoInstagramCallbackUrl,
-  buildInstagramAuthorizeUrl,
   getInstagramRedirectUri,
 } from "../lib/instagramAuthConfig"
 import { clearDemoSession, getStoredDemoSession, loginDemoUser } from "./demoSessionService"
@@ -97,25 +96,32 @@ export async function loginWithCredentials({ identifier, password }) {
 }
 
 export async function startInstagramSignup({ email, password }) {
-  const authorizeUrl = buildInstagramAuthorizeUrl()
-
-  if (authorizeUrl) {
+  if (isDemoFallbackEnabled()) {
     savePendingSignupCredentials({ email, password })
 
     return {
       type: "redirect",
-      source: "instagram",
-      url: authorizeUrl,
+      source: "demo",
+      url: buildDemoInstagramCallbackUrl(),
     }
   }
 
-  savePendingSignupCredentials({ email, password })
+  const response = await bootstrapInstagramSession({
+    email,
+    password,
+    redirectUri: getInstagramRedirectUri(),
+    forceReauth: import.meta.env.VITE_INSTAGRAM_FORCE_REAUTH !== "false",
+  })
 
-  return {
-    type: "redirect",
-    source: "demo",
-    url: buildDemoInstagramCallbackUrl(),
+  if (response?.action === "redirect" && response?.authorizeUrl) {
+    return {
+      type: "redirect",
+      source: "backend",
+      url: response.authorizeUrl,
+    }
   }
+
+  throw new Error("Instagram login could not be started right now.")
 }
 
 export async function logoutSession() {

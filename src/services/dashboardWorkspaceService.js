@@ -95,23 +95,23 @@ export async function finishInstagramLogin(callbackParams) {
     )
   }
 
-  const pendingCredentials = consumePendingSignupCredentials()
-
-  if (!pendingCredentials) {
-    throw new Error(
-      "We could not recover your signup details after Instagram login. Please create your account again.",
-    )
-  }
-
   const payload = {
     code: callbackParams.code,
     state: callbackParams.state,
     redirectUri: getInstagramRedirectUri(),
-    email: pendingCredentials.email,
-    password: pendingCredentials.password,
   }
 
   if (isDemoFallbackEnabled()) {
+    const pendingCredentials = consumePendingSignupCredentials()
+
+    if (!pendingCredentials) {
+      throw new Error(
+        "We could not recover your signup details after Instagram login. Please create your account again.",
+      )
+    }
+
+    payload.email = pendingCredentials.email
+    payload.password = pendingCredentials.password
     await completeDemoInstagramSignup(payload)
     return
   }
